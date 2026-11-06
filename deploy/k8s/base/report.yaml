@@ -30,6 +30,7 @@ spec:
         spec:
           serviceAccountName: cuepoint-report
           automountServiceAccountToken: false
+          enableServiceLinks: false
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true

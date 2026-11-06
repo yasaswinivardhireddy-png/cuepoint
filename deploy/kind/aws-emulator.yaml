@@ -23,6 +23,9 @@ spec:
         app.kubernetes.io/name: moto
     spec:
       automountServiceAccountToken: false
+      # Otherwise Kubernetes injects MOTO_PORT=tcp://<ip>:5000 for this Service, and moto reads
+      # MOTO_PORT as its port number.
+      enableServiceLinks: false
       containers:
         - name: moto
           image: motoserver/moto:5.2.5

@@ -40,7 +40,10 @@ wait_for() {
 diagnose() {
   {
     kubectl get pods -A -o wide
-    kubectl -n cuepoint get events --sort-by=.lastTimestamp | tail -n 60
+    kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
+    echo "--- logs: moto"
+    kubectl -n cuepoint-aws logs deploy/moto --tail=60 --all-containers
+    kubectl -n cuepoint-aws logs deploy/moto --tail=60 --all-containers --previous
     for d in api adserver worker web valkey; do
       echo "--- logs: $d"
       kubectl -n cuepoint logs "deploy/$d" --tail=100 --all-containers

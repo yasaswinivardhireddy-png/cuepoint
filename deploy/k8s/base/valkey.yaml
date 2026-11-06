@@ -20,6 +20,7 @@ spec:
         app.kubernetes.io/name: valkey
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 999

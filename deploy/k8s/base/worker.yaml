@@ -30,6 +30,7 @@ spec:
     spec:
       serviceAccountName: cuepoint-worker
       automountServiceAccountToken: false
+      enableServiceLinks: false
       # SIGTERM lets the current batch finish; a long poll lasts at most WAIT_SECONDS.
       terminationGracePeriodSeconds: 30
       securityContext:

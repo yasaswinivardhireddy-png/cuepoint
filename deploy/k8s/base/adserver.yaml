@@ -33,6 +33,7 @@ spec:
     spec:
       serviceAccountName: cuepoint-adserver
       automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
