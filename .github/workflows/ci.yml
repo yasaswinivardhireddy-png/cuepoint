@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/screenshots/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/screenshots/**"]
   workflow_dispatch:
 
 permissions:
