@@ -186,6 +186,7 @@ jobs:
           kubeconform -strict -summary -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             rendered/kind/all.yaml rendered/prod/all.yaml
+          for f in rendered/kind/all.yaml rendered/prod/all.yaml; do awk -f scripts/check-namespace.awk "$f"; done
       - name: Security scan of the production manifests and Dockerfiles (Trivy)
         run: |
           docker run --rm -v "$PWD:/src:ro" --entrypoint sh "$TRIVY_IMAGE" -c '
