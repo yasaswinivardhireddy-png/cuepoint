@@ -1,0 +1,247 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: 1.17.1
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+
+jobs:
+  adserver:
+    name: Ad server (Go)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: adserver
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache-dependency-path: adserver/go.sum
+      - name: Format and vet
+        run: |
+          unformatted=$(gofmt -l .)
+          [ -z "$unformatted" ] || { echo "Run gofmt on: $unformatted"; exit 1; }
+          go vet ./...
+      - name: Test with the race detector
+        run: go test -race -count=1 ./...
+      - name: Known vulnerabilities (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Ad decision benchmark
+        run: |
+          go test -run '^$' -bench . -benchmem ./internal/decision | tee bench.txt
+          {
+            echo "### Ad decision benchmark"
+            echo '```'
+            grep -E '^(cpu:|Benchmark)' bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  api:
+    name: Campaign API (Node.js)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: api
+    services:
+      moto:
+        image: motoserver/moto:5.2.5
+        ports: ["5000:5000"]
+        options: >-
+          --health-cmd "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/moto-api/')\""
+          --health-interval 3s --health-timeout 5s --health-retries 20
+    env:
+      AWS_ENDPOINT_URL: http://localhost:5000
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: ap-south-1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - run: npm run typecheck
+      - name: Test (including DynamoDB against moto)
+        run: npm test
+      - name: OpenAPI document is current
+        run: |
+          npm run openapi
+          git diff --exit-code ../docs/openapi.json
+
+  web:
+    name: Web app (React)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Bundle size
+        run: |
+          {
+            echo "### Web bundle"
+            echo "| File | gzip |"
+            echo "|---|---:|"
+            for f in dist/assets/*.js dist/assets/*.css; do
+              printf '| %s | %.1f KB |\n' "$(basename "$f")" "$(gzip -9c "$f" | wc -c | awk '{print $1/1024}')"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  reporting:
+    name: Delivery pipeline (Python)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: reporting
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          cache-dependency-glob: reporting/pyproject.toml
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+
+  terraform:
+    name: Infrastructure (Terraform)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: infra/terraform
+    services:
+      moto:
+        image: motoserver/moto:5.2.5
+        ports: ["5000:5000"]
+        env:
+          S3_IGNORE_SUBDOMAIN_BUCKETNAME: "true"
+        options: >-
+          --health-cmd "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/moto-api/')\""
+          --health-interval 3s --health-timeout 5s --health-retries 20
+    env:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive
+      - run: terraform init -input=false
+      - run: terraform validate
+      - name: Security scan (Trivy)
+        run: docker run --rm -v "$PWD:/src:ro" "$TRIVY_IMAGE" config --exit-code 1 --severity MEDIUM,HIGH,CRITICAL /src
+      - name: Apply to the AWS emulator (moto)
+        run: terraform apply -input=false -auto-approve -var-file=environments/local.tfvars
+      - name: Outputs
+        run: terraform output
+
+  kubernetes:
+    name: Kubernetes manifests and alerts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install kustomize and kubeconform
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz | tar -xz -C "$HOME/.local/bin" kustomize
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar -xz -C "$HOME/.local/bin" kubeconform
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Render and validate the overlays
+        run: |
+          cp deploy/k8s/overlays/kind/secrets.env.example deploy/k8s/overlays/kind/secrets.env
+          mkdir -p rendered/kind rendered/prod
+          kustomize build deploy/k8s/overlays/kind > rendered/kind/all.yaml
+          kustomize build deploy/k8s/overlays/eks > rendered/prod/all.yaml
+          kubeconform -strict -summary -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/kind/all.yaml rendered/prod/all.yaml
+      - name: Security scan of the production manifests and Dockerfiles (Trivy)
+        run: |
+          docker run --rm -v "$PWD:/src:ro" --entrypoint sh "$TRIVY_IMAGE" -c '
+            for target in rendered/prod adserver api reporting web; do
+              echo "== $target"
+              trivy config --quiet --exit-code 1 --severity MEDIUM,HIGH,CRITICAL "/src/$target" || exit 1
+            done'
+      - name: Alert rules (promtool)
+        run: |
+          docker run --rm -v "$PWD/deploy/observability:/rules:ro" --entrypoint promtool prom/prometheus:v3.16.0 check rules /rules/alerts.yaml
+          docker run --rm -v "$PWD/deploy/observability:/rules:ro" --entrypoint promtool prom/prometheus:v3.16.0 test rules /rules/alerts.test.yaml
+
+  compose:
+    name: Docker Compose smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/compose-smoke.sh
+
+  e2e:
+    name: End-to-end on Kubernetes (kind)
+    needs: [adserver, api, web, reporting, terraform, kubernetes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Install kind and kubectl
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          curl -fsSLo "$HOME/.local/bin/kubectl" https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+          chmod +x "$HOME/.local/bin/kind" "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install web dependencies and Chromium
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Deploy to kind and run the browser, load, accuracy and report tests
+        run: bash scripts/e2e-kind.sh
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-results
+          path: |
+            e2e-out/
+            !e2e-out/terraform.tfstate*
+            web/playwright-report/
+          if-no-files-found: ignore

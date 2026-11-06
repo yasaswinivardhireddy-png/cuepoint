@@ -1,0 +1,117 @@
+# promtool test rules deploy/observability/alerts.test.yaml
+rule_files:
+  - alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: slow ad decisions page after five minutes
+    interval: 1m
+    input_series:
+      - series: 'adserver_http_request_duration_seconds_bucket{route="GET /v1/pods",code="200",le="0.05"}'
+        values: "0+0x15"
+      - series: 'adserver_http_request_duration_seconds_bucket{route="GET /v1/pods",code="200",le="0.1"}'
+        values: "0+0x15"
+      - series: 'adserver_http_request_duration_seconds_bucket{route="GET /v1/pods",code="200",le="0.25"}'
+        values: "0+600x15"
+      - series: 'adserver_http_request_duration_seconds_bucket{route="GET /v1/pods",code="200",le="+Inf"}'
+        values: "0+600x15"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AdDecisionLatencyHigh
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AdDecisionLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: ad-platform
+            exp_annotations:
+              summary: Ad decisions are slower than 50 ms at p99; players may time out and show no ad.
+              runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#addecisionlatencyhigh
+
+  - name: dropped impression events page at once
+    interval: 1m
+    input_series:
+      - series: 'adserver_events_dropped_total{pod="adserver-a"}'
+        values: "0 0 0 25 25 25"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ImpressionEventsLost
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ImpressionEventsLost
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: ad-platform
+            exp_annotations:
+              summary: Impression events were dropped or could not be sent to SQS; advertisers will be under-billed.
+              runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#impressioneventslost
+
+  - name: a stale campaign snapshot pages after two minutes
+    interval: 1m
+    input_series:
+      - series: 'adserver_catalog_age_seconds{pod="adserver-a"}'
+        values: "5 5 70 130 190 250"
+      - series: 'adserver_catalog_age_seconds{pod="adserver-b"}'
+        values: "3 4 5 3 4 5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CampaignSnapshotStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: CampaignSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: ad-platform
+            exp_annotations:
+              summary: An ad server has not synced campaigns for over a minute; paused campaigns may still serve.
+              runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#campaignsnapshotstale
+
+  - name: counting that falls behind pages
+    interval: 1m
+    input_series:
+      - series: 'adserver_impressions_total{pod="adserver-a"}'
+        values: "0+1000x40"
+      - series: 'worker_events_counted_total{pod="worker-a"}'
+        values: "0+500x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ImpressionCountingBehind
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: ad-platform
+            exp_annotations:
+              summary: The worker is counting impressions more slowly than they arrive; pacing and reports lag.
+              runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#impressioncountingbehind
+
+  - name: counting pages when no worker is running
+    interval: 1m
+    input_series:
+      - series: 'adserver_impressions_total{pod="adserver-a"}'
+        values: "0+1000x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ImpressionCountingBehind
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: ad-platform
+            exp_annotations:
+              summary: The worker is counting impressions more slowly than they arrive; pacing and reports lag.
+              runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#impressioncountingbehind
+
+  - name: a worker that keeps up stays quiet
+    interval: 1m
+    input_series:
+      - series: 'adserver_impressions_total{pod="adserver-a"}'
+        values: "0+1000x40"
+      - series: 'worker_events_counted_total{pod="worker-a"}'
+        values: "0+990x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ImpressionCountingBehind
+        exp_alerts: []

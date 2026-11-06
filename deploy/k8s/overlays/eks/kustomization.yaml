@@ -1,0 +1,89 @@
+# Production shape on Amazon EKS. Replace the account ID, domain and certificate; the queue, table
+# and bucket names are the Terraform outputs for environment = "prod".
+#   kubectl apply -k deploy/k8s/overlays/eks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - ingress.yaml
+  - external-secret.yaml
+
+# CI sets the tag to the commit SHA: kustomize edit set image cuepoint/api=<ecr>/cuepoint/api:<sha>
+images:
+  - name: cuepoint/api
+    newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/cuepoint/api
+    newTag: "1.0.0"
+  - name: cuepoint/adserver
+    newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/cuepoint/adserver
+    newTag: "1.0.0"
+  - name: cuepoint/reporting
+    newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/cuepoint/reporting
+    newTag: "1.0.0"
+  - name: cuepoint/web
+    newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/cuepoint/web
+    newTag: "1.0.0"
+  # Third-party images come through an ECR pull-through cache, not straight from Docker Hub.
+  - name: valkey/valkey
+    newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/docker-hub/valkey/valkey
+
+configMapGenerator:
+  - name: cuepoint-env
+    behavior: merge
+    literals:
+      - CAMPAIGNS_TABLE=cuepoint-prod-campaigns
+      - DELIVERY_TABLE=cuepoint-prod-delivery
+      - PROCESSED_EVENTS_TABLE=cuepoint-prod-processed-events
+      - REPORTS_BUCKET=cuepoint-prod-delivery-reports-123456789012
+      - EVENTS_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/cuepoint-prod-ad-events
+      - PUBLIC_BASE_URL=https://cuepoint.example.com/ads
+
+patches:
+  # IAM Roles for Service Accounts: each workload assumes its own least-privilege role
+  # (infra/terraform/iam.tf, output service_role_arns).
+  - target:
+      kind: ServiceAccount
+      name: cuepoint-api
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cuepoint-prod-api
+  - target:
+      kind: ServiceAccount
+      name: cuepoint-adserver
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cuepoint-prod-adserver
+  - target:
+      kind: ServiceAccount
+      name: cuepoint-worker
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cuepoint-prod-worker
+  - target:
+      kind: ServiceAccount
+      name: cuepoint-report
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cuepoint-prod-report
+  # The ALB and nginx both add an X-Forwarded-For entry.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api
+                env:
+                  - name: TRUST_PROXY_HOPS
+                    value: "2"

@@ -1,0 +1,59 @@
+# moto (https://github.com/getmoto/moto) emulates SQS, DynamoDB, S3 and IAM inside the cluster, so
+# the same Terraform and the same AWS SDK calls run locally and in CI without an AWS account.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cuepoint-aws
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moto
+  namespace: cuepoint-aws
+  labels:
+    app.kubernetes.io/name: moto
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: moto
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moto
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: moto
+          image: motoserver/moto:5.2.5
+          env:
+            # Path-style S3 only: host names such as moto.cuepoint-aws are not bucket names.
+            - name: S3_IGNORE_SUBDOMAIN_BUCKETNAME
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /moto-api/
+              port: http
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: moto
+  namespace: cuepoint-aws
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: moto
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      nodePort: 30500

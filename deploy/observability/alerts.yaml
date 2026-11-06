@@ -1,0 +1,123 @@
+# Prometheus alerting rules for Cuepoint. Each alert names the user or revenue impact and links to
+# its runbook entry (docs/runbook.md). Load them with kube-prometheus-stack
+# (additionalPrometheusRulesMap) or as a PrometheusRule. Unit tests: alerts.test.yaml (promtool).
+groups:
+  - name: cuepoint-adserver
+    rules:
+      - alert: AdDecisionLatencyHigh
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(adserver_http_request_duration_seconds_bucket{route="GET /v1/pods"}[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: page
+          team: ad-platform
+        annotations:
+          summary: Ad decisions are slower than 50 ms at p99; players may time out and show no ad.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#addecisionlatencyhigh
+
+      - alert: AdDecisionErrors
+        expr: |
+          sum(rate(adserver_http_request_duration_seconds_count{route="GET /v1/pods",code=~"5.."}[5m]))
+            / sum(rate(adserver_http_request_duration_seconds_count{route="GET /v1/pods"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: page
+          team: ad-platform
+        annotations:
+          summary: More than 1% of ad break requests fail.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#addecisionerrors
+
+      - alert: ImpressionEventsLost
+        # "or vector(0)" keeps the sum defined when one of the counters has no series yet.
+        expr: |
+          (sum(increase(adserver_events_dropped_total[10m])) or vector(0))
+            + (sum(increase(adserver_events_failed_total[10m])) or vector(0)) > 0
+        labels:
+          severity: page
+          team: ad-platform
+        annotations:
+          summary: Impression events were dropped or could not be sent to SQS; advertisers will be under-billed.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#impressioneventslost
+
+      - alert: CampaignSnapshotStale
+        expr: max(adserver_catalog_age_seconds) > 60
+        for: 2m
+        labels:
+          severity: page
+          team: ad-platform
+        annotations:
+          summary: An ad server has not synced campaigns for over a minute; paused campaigns may still serve.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#campaignsnapshotstale
+
+      - alert: FrequencyCapStoreErrors
+        expr: sum(rate(adserver_frequency_cap_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: ticket
+          team: ad-platform
+        annotations:
+          summary: Valkey is failing, so ads are being served without frequency caps.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#frequencycapstoreerrors
+
+      - alert: FillRateLow
+        expr: |
+          sum(rate(adserver_pod_seconds_total{kind="filled"}[15m]))
+            / sum(rate(adserver_pod_seconds_total{kind="requested"}[15m])) < 0.5
+        for: 30m
+        labels:
+          severity: ticket
+          team: ad-platform
+        annotations:
+          summary: Less than half of requested ad break time is being filled.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#fillratelow
+
+  - name: cuepoint-pipeline
+    rules:
+      - alert: ImpressionCountingBehind
+        # Also fires when no worker is running at all (its counter is then missing, not zero).
+        expr: |
+          (
+            sum(increase(adserver_impressions_total[15m]))
+              - (sum(increase(worker_events_counted_total[15m])) or vector(0))
+          ) > 0.05 * sum(increase(adserver_impressions_total[15m]))
+          and sum(increase(adserver_impressions_total[15m])) > 100
+        for: 15m
+        labels:
+          severity: page
+          team: ad-platform
+        annotations:
+          summary: The worker is counting impressions more slowly than they arrive; pacing and reports lag.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#impressioncountingbehind
+
+      - alert: WorkerBatchesFailing
+        expr: sum(increase(worker_batches_failed_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: ticket
+          team: ad-platform
+        annotations:
+          summary: The worker keeps failing to write impression counts to DynamoDB; events wait on the queue.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#workerbatchesfailing
+
+      - alert: InvalidEventsDeadLettered
+        expr: sum(increase(worker_messages_invalid_total[1h])) > 0
+        labels:
+          severity: ticket
+          team: ad-platform
+        annotations:
+          summary: Malformed events reached the queue and are going to the dead-letter queue.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#invalideventsdeadlettered
+
+  - name: cuepoint-api
+    rules:
+      - alert: CampaignApiErrors
+        expr: |
+          sum(rate(api_http_request_duration_seconds_count{status=~"5.."}[5m]))
+            / sum(rate(api_http_request_duration_seconds_count[5m])) > 0.02
+        for: 10m
+        labels:
+          severity: ticket
+          team: ad-platform
+        annotations:
+          summary: More than 2% of campaign API requests fail.
+          runbook_url: https://github.com/yasaswinivardhireddy-png/cuepoint/blob/main/docs/runbook.md#campaignapierrors

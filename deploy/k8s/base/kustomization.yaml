@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cuepoint
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: cuepoint
+
+resources:
+  - namespace.yaml
+  - api.yaml
+  - adserver.yaml
+  - worker.yaml
+  - report.yaml
+  - web.yaml
+  - valkey.yaml
+  - network-policies.yaml
+
+# Per-environment settings; the values come from the Terraform outputs. Overlays merge their own
+# values in, and the name suffix kustomize adds makes pods restart when a value changes.
+configMapGenerator:
+  - name: cuepoint-env
+    literals:
+      - AWS_REGION=ap-south-1
+      - AWS_DEFAULT_REGION=ap-south-1
+      - CAMPAIGNS_TABLE=cuepoint-dev-campaigns
+      - DELIVERY_TABLE=cuepoint-dev-delivery
+      - PROCESSED_EVENTS_TABLE=cuepoint-dev-processed-events
+      - REPORTS_BUCKET=cuepoint-dev-delivery-reports-123456789012
+      - EVENTS_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/cuepoint-dev-ad-events
+      - PUBLIC_BASE_URL=https://cuepoint.example.com/ads

@@ -1,0 +1,8 @@
+# Example for a real AWS account with an EKS cluster. Copy, fill in and keep state in a remote backend.
+environment = "prod"
+region      = "ap-south-1"
+
+eks_oidc_provider = {
+  arn = "arn:aws:iam::111122223333:oidc-provider/oidc.eks.ap-south-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
+  url = "https://oidc.eks.ap-south-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
+}

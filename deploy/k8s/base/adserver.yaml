@@ -1,0 +1,162 @@
+# Ad server (Go). Stateless: campaigns come from the API's snapshot, frequency caps from Valkey,
+# and impression events go to SQS. Scales on CPU.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cuepoint-adserver
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adserver
+  labels:
+    app.kubernetes.io/name: adserver
+spec:
+  # No replicas field: the HorizontalPodAutoscaler below owns the count, so a re-apply cannot reset it.
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: adserver
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: adserver
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: cuepoint-adserver
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas over zones and nodes so losing one does not take the ad server down.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: adserver
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: adserver
+      containers:
+        - name: adserver
+          image: cuepoint/adserver:dev
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: cuepoint-env
+          env:
+            - name: CAMPAIGNS_URL
+              value: http://api:3000/internal/v1/campaigns/active
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cuepoint-secrets
+                  key: INTERNAL_API_TOKEN
+            - name: BEACON_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cuepoint-secrets
+                  key: BEACON_SECRET
+            - name: FREQCAP_BACKEND
+              value: redis
+            - name: REDIS_ADDR
+              value: valkey:6379
+            # On SIGTERM, fail readiness and keep serving this long so the endpoint is removed first.
+            - name: SHUTDOWN_DELAY
+              value: 5s
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adserver
+  labels:
+    app.kubernetes.io/name: adserver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: adserver
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: adserver
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: adserver
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: adserver
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: adserver
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    # Ad traffic spikes at live-event breaks: add pods fast, remove them slowly.
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300

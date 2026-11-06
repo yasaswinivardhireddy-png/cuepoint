@@ -1,0 +1,41 @@
+[project]
+name = "cuepoint-reporting"
+version = "1.0.0"
+description = "Delivery pipeline for the Cuepoint ad platform: counts impression events from SQS exactly once into DynamoDB and writes daily pacing reports to S3."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40,<2",
+    "prometheus-client>=0.21,<1",
+]
+
+[project.scripts]
+cuepoint-worker = "cuepoint_reporting.worker:main"
+cuepoint-report = "cuepoint_reporting.report:main"
+
+[dependency-groups]
+dev = [
+    "moto[dynamodb,s3,sqs]>=5.1,<6",
+    "pytest>=8,<10",
+    "ruff>=0.12",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cuepoint_reporting"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = ["S101"]  # assert is how pytest checks

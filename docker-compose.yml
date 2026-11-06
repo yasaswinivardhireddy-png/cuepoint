@@ -1,0 +1,144 @@
+# The whole platform on one machine: the four services, Valkey for frequency caps, and moto standing
+# in for AWS (SQS, DynamoDB, S3, IAM), with the tables and queues created by the real Terraform.
+#
+#   docker compose up --build -d      then open http://localhost:8080 (password: cuepoint-demo)
+#   docker compose --profile tools run --rm --no-deps report --day 2026-11-06
+#   docker compose down
+#
+# The secrets below are local-only defaults; set them in a .env file to change them.
+name: cuepoint
+
+x-aws: &aws
+  AWS_REGION: ap-south-1
+  AWS_DEFAULT_REGION: ap-south-1
+  AWS_ACCESS_KEY_ID: local
+  AWS_SECRET_ACCESS_KEY: local
+  AWS_ENDPOINT_URL: http://moto:5000
+
+x-pipeline: &pipeline
+  EVENTS_QUEUE_URL: http://moto:5000/123456789012/cuepoint-local-ad-events
+  CAMPAIGNS_TABLE: cuepoint-local-campaigns
+  DELIVERY_TABLE: cuepoint-local-delivery
+  PROCESSED_EVENTS_TABLE: cuepoint-local-processed-events
+  REPORTS_BUCKET: cuepoint-local-delivery-reports-123456789012
+
+services:
+  moto:
+    image: motoserver/moto:5.2.5
+    environment:
+      S3_IGNORE_SUBDOMAIN_BUCKETNAME: "true"
+    networks:
+      default:
+        # Terraform reads bucket tags through S3 Control, which puts the account ID in front of the host.
+        aliases: ["123456789012.moto"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/moto-api/', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  terraform:
+    image: hashicorp/terraform:1.17
+    depends_on:
+      moto: { condition: service_healthy }
+    working_dir: /work
+    environment:
+      <<: *aws
+      TF_IN_AUTOMATION: "1"
+      TF_PLUGIN_CACHE_DIR: /plugins
+    volumes:
+      - ./infra/terraform:/src:ro
+      - terraform-plugins:/plugins
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        cp /src/*.tf /src/.terraform.lock.hcl .
+        terraform init -input=false
+        terraform apply -input=false -auto-approve -var environment=local -var aws_endpoint=http://moto:5000
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-ttl"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./api
+    image: cuepoint/api:local
+    depends_on:
+      terraform: { condition: service_completed_successfully }
+    environment:
+      <<: *aws
+      CAMPAIGNS_TABLE: cuepoint-local-campaigns
+      DELIVERY_TABLE: cuepoint-local-delivery
+      JWT_SECRET: ${JWT_SECRET:-local-only-jwt-secret-change-me-0123456789}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-only-internal-token}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-cuepoint-demo}
+      SEED_DEMO: "true"
+      TRUST_PROXY_HOPS: "1"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  adserver:
+    build: ./adserver
+    image: cuepoint/adserver:local
+    depends_on:
+      api: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+    environment:
+      <<: *aws
+      EVENTS_QUEUE_URL: http://moto:5000/123456789012/cuepoint-local-ad-events
+      CAMPAIGNS_URL: http://api:3000/internal/v1/campaigns/active
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-only-internal-token}
+      BEACON_SECRET: ${BEACON_SECRET:-local-only-beacon-secret}
+      # Beacons go through the web edge, the same origin as the app.
+      PUBLIC_BASE_URL: http://localhost:8080/ads
+      FREQCAP_BACKEND: redis
+      REDIS_ADDR: valkey:6379
+
+  worker:
+    build: ./reporting
+    image: cuepoint/reporting:local
+    depends_on:
+      terraform: { condition: service_completed_successfully }
+    environment:
+      <<: [*aws, *pipeline]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9102/metrics', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build: ./web
+    image: cuepoint/web:local
+    depends_on:
+      api: { condition: service_healthy }
+      adserver: { condition: service_started }
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Daily delivery report, normally a Kubernetes CronJob.
+  report:
+    build: ./reporting
+    image: cuepoint/reporting:local
+    profiles: ["tools"]
+    entrypoint: ["cuepoint-report"]
+    depends_on:
+      terraform: { condition: service_completed_successfully }
+    environment:
+      <<: [*aws, *pipeline]
+
+volumes:
+  terraform-plugins:

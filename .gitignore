@@ -1,0 +1,37 @@
+# Dependencies and build output
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.egg-info/
+
+# uv.lock records the package index the developer used; CI resolves from PyPI.
+uv.lock
+
+# Test and tool output
+test-results/
+playwright-report/
+.pytest_cache/
+.ruff_cache/
+coverage/
+e2e-out/
+*.test
+*.out
+*.prof
+
+# Terraform state and plugins (state from local or CI runs against the emulator)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Secrets generated for local clusters
+secrets.env
+.env
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
